@@ -1,4 +1,4 @@
-.PHONY: frontend webapp payment gogo build　stop-services start-services truncate-logs bench kataribe
+.PHONY: frontend webapp payment gogo build　stop-services start-services kenji truncate-logs bench kataribe
 
 all: frontend webapp payment bench
 
@@ -14,7 +14,7 @@ webapp:
 payment:
 	cd blackbox/payment && make && cp bin/payment_linux ../../ansible/roles/benchmark/files/payment
 
-gogo: stop-services build truncate-logs start-services bench
+gogo: stop-services build kenji truncate-logs start-services bench
 
 build:
 	make -C webapp/go isutrain
@@ -41,3 +41,8 @@ bench:
 
 kataribe:
 	sudo cat /var/log/nginx/access.log | ./kataribe
+
+kenji:
+	sudo  cp -p /var/log/nginx/access.log  /home/isucon/logs/nginx/access.`date "+%Y%m%d_%H%M%S"`.log
+	sudo  cp -p /var/log/mysql/mysql-slow.log  /home/isucon/logs/mysql/mysql-slow.`date "+%Y%m%d_%H%M%S"`.log 
+	sudo chmod -R 777 /home/isucon/logs/*

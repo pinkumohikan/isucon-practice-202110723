@@ -1,4 +1,4 @@
-.PHONY: frontend webapp payment gogo build　stop-services start-services truncate-logs bench kataribe
+.PHONY: frontend webapp payment gogo build　stop-services start-services kenji truncate-logs bench kataribe
 
 all: frontend webapp payment bench
 
@@ -14,7 +14,7 @@ webapp:
 payment:
 	cd blackbox/payment && make && cp bin/payment_linux ../../ansible/roles/benchmark/files/payment
 
-gogo: stop-services build truncate-logs start-services bench
+gogo: stop-services build kenji minako truncate-logs start-services bench
 
 build:
 	make -C webapp/go isutrain
@@ -33,9 +33,20 @@ start-services:
 truncate-logs:
 	sudo truncate --size 0 /var/log/nginx/access.log
 	sudo truncate --size 0 /var/log/nginx/error.log
+	sudo truncate --size 0 /var/log/mysql/mysql-slow.log
+	sudo truncate --size 0 /var/log/mysql/error.log
 
 bench:
-	cd bench && ./bin/bench_linux run --target=http://localhost
-
+	ssh isucon@3.114.9.128 "cd /home/isucon/isutrain/bench && ./bin/bench_linux run --payment=http://35.75.15.159:5000   --target=http://35.75.15.159"
 kataribe:
 	sudo cat /var/log/nginx/access.log | ./kataribe
+
+kenji: TS=$(shell date "+%Y%m%d_%H%M%S")
+kenji: 
+	mkdir /home/isucon/logs/$(TS)
+	sudo  cp -p /var/log/nginx/access.log  /home/isucon/logs/$(TS)/access.log
+	sudo  cp -p /var/log/mysql/mysql-slow.log  /home/isucon/logs/$(TS)/mysql-slow.log
+	sudo chmod -R 777 /home/isucon/logs/*
+minako:
+	scp -C kataribe.toml ubuntu@35.74.231.100:~/
+	rsync -av -e ssh /home/isucon/logs ubuntu@35.74.231.100:/home/ubuntu  

@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"time"
 
+	_ "net/http/pprof"
+
 	"github.com/felixge/fgprof"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/sessions"
@@ -22,7 +24,6 @@ import (
 	goji "goji.io"
 	"goji.io/pat"
 	"golang.org/x/crypto/pbkdf2"
-	_ "net/http/pprof"
 )
 
 var (
@@ -243,9 +244,9 @@ const (
 )
 
 var (
-	store sessions.Store = sessions.NewCookieStore([]byte(secureRandomStr(20)))
-	stationList = StationList{}
-	stationListByName = map[string]Station{}
+	store             sessions.Store = sessions.NewCookieStore([]byte(secureRandomStr(20)))
+	stationList                      = StationList{}
+	stationListByName                = map[string]Station{}
 )
 
 func handler(w http.ResponseWriter, r *http.Request) {
@@ -765,17 +766,29 @@ func trainSeatsHandler(w http.ResponseWriter, r *http.Request) {
 
 		s := SeatInformation{seat.SeatRow, seat.SeatColumn, seat.SeatClass, seat.IsSmokingSeat, false}
 
-		seatReservationList := []SeatReservation{}
+		type SeatReservationNeo struct {
+			ReservationId int    `json:"reservation_id,omitempty" db:"reservation_id"`
+			CarNumber     int    `json:"car_number,omitempty" db:"car_number"`
+			SeatRow       int    `json:"seat_row" db:"seat_row"`
+			SeatColumn    string `json:"seat_column" db:"seat_column"`
+			Departure     string `json:"_" db:"departure"`
+			Arrival       string `json:"_" db:"arrival"`
+		}
+
+		seatReservationNeoList := []SeatReservationNeo{}
 
 		query := `
-SELECT s.*
-FROM seat_reservations s, reservations r
+SELECT s.*, r.departure, r.arrival
+FROM seat_reservations s
+LEFT JOIN reservations r
+	ON s.reservation_id = r.reservation_id
+
 WHERE
 	r.date=? AND r.train_class=? AND r.train_name=? AND car_number=? AND seat_row=? AND seat_column=?
 `
 
 		err = dbx.Select(
-			&seatReservationList, query,
+			&seatReservationNeoList, query,
 			date.Format("2006/01/02"),
 			seat.TrainClass,
 			trainName,
@@ -788,19 +801,13 @@ WHERE
 			return
 		}
 
-		fmt.Println(seatReservationList)
+		fmt.Println(seatReservationNeoList)
 
-		for _, seatReservation := range seatReservationList {
-			reservation := Reservation{}
-			query = "SELECT * FROM reservations WHERE reservation_id=?"
-			err = dbx.Get(&reservation, query, seatReservation.ReservationId)
-			if err != nil {
-				panic(err)
-			}
+		for _, seatReservationNeo := range seatReservationNeoList {
 
 			var departureStation, arrivalStation Station
-			departureStation = searchStationMasterByName(reservation.Departure)
-			arrivalStation = searchStationMasterByName(reservation.Arrival)
+			departureStation = searchStationMasterByName(seatReservationNeo.Departure)
+			arrivalStation = searchStationMasterByName(seatReservationNeo.Arrival)
 
 			if train.IsNobori {
 				// 上り
@@ -1979,7 +1986,6 @@ func createStationMaster() {
 func searchStationMasterByName(name string) Station {
 	return stationListByName[name]
 }
-
 
 func main() {
 	// MySQL関連のお膳立て

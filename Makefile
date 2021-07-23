@@ -35,7 +35,7 @@ truncate-logs:
 	sudo truncate --size 0 /var/log/nginx/error.log
 
 bench:
-	cd bench && make && cp -av bin/bench_linux ../ansible/roles/benchmark/files/bench && cp -av bin/benchworker_linux ../ansible/roles/benchmark/files/benchworker
+	cd bench && ./bin/bench_linux run --target=http://localhost
 
 kataribe:
 	sudo cat /var/log/nginx/access.log | ./kataribe

@@ -1888,7 +1888,7 @@ func createStationMaster() {
 		log.Println(err.Error())
 	}
 
-	stationList = make(StationList, 82)
+	stationList = make(StationList, 100)
 	for _, station := range sl {
 		stationList[station.ID] = station
 		stationListByName[station.Name] = station

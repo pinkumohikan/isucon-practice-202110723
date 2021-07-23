@@ -240,7 +240,7 @@ type AuthResponse struct {
 
 const (
 	sessionName   = "session_isutrain"
-	availableDays = 30
+	availableDays = 50
 )
 
 var (
@@ -1040,6 +1040,7 @@ func trainReservationHandler(w http.ResponseWriter, r *http.Request) {
 		req.Seats = []RequestSeat{} // 座席リクエスト情報は空に
 		for carnum := 1; carnum <= 16; carnum++ {
 			seatList := []Seat{}
+
 			query = "SELECT * FROM seat_master WHERE train_class=? AND car_number=? AND seat_class=? AND is_smoking_seat=? ORDER BY seat_row, seat_column"
 			err = dbx.Select(&seatList, query, req.TrainClass, carnum, req.SeatClass, req.IsSmokingSeat)
 			if err != nil {
@@ -1051,10 +1052,26 @@ func trainReservationHandler(w http.ResponseWriter, r *http.Request) {
 			var seatInformationList []SeatInformation
 			for _, seat := range seatList {
 				s := SeatInformation{seat.SeatRow, seat.SeatColumn, seat.SeatClass, seat.IsSmokingSeat, false}
-				seatReservationList := []SeatReservation{}
-				query = "SELECT s.* FROM seat_reservations s, reservations r WHERE r.date=? AND r.train_class=? AND r.train_name=? AND car_number=? AND seat_row=? AND seat_column=? FOR UPDATE"
+				type SeatReservationNeo struct {
+					ReservationId int    `json:"reservation_id,omitempty" db:"reservation_id"`
+					CarNumber     int    `json:"car_number,omitempty" db:"car_number"`
+					SeatRow       int    `json:"seat_row" db:"seat_row"`
+					SeatColumn    string `json:"seat_column" db:"seat_column"`
+					Departure     string `json:"_" db:"departure"`
+					Arrival       string `json:"_" db:"arrival"`
+				}
+
+				seatReservationNeoList := []SeatReservationNeo{}
+				query := `
+				SELECT s.*, r.departure, r.arrival
+				FROM seat_reservations s
+				LEFT JOIN reservations r
+					ON s.reservation_id = r.reservation_id
+				WHERE
+					r.date=? AND r.train_class=? AND r.train_name=? AND car_number=? AND seat_row=? AND seat_column=?
+				`
 				err = dbx.Select(
-					&seatReservationList, query,
+					&seatReservationNeoList, query,
 					date.Format("2006/01/02"),
 					seat.TrainClass,
 					req.TrainName,
@@ -1068,17 +1085,11 @@ func trainReservationHandler(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 
-				for _, seatReservation := range seatReservationList {
-					reservation := Reservation{}
-					query = "SELECT * FROM reservations WHERE reservation_id=? FOR UPDATE"
-					err = dbx.Get(&reservation, query, seatReservation.ReservationId)
-					if err != nil {
-						panic(err)
-					}
+				for _, seatReservation := range seatReservationNeoList {
 
 					var departureStation, arrivalStation Station
-					departureStation = searchStationMasterByName(reservation.Departure)
-					arrivalStation = searchStationMasterByName(reservation.Arrival)
+					departureStation = searchStationMasterByName(seatReservation.Departure)
+					arrivalStation = searchStationMasterByName(seatReservation.Arrival)
 
 					if train.IsNobori {
 						// 上り

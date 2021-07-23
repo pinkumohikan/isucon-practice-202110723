@@ -29,6 +29,7 @@ import (
 var (
 	banner        = `ISUTRAIN API`
 	TrainClassMap = map[string]string{"express": "最速", "semi_express": "中間", "local": "遅いやつ"}
+	client = &http.Client{Timeout: time.Duration(10) * time.Second}
 )
 
 var dbx *sqlx.DB
@@ -1838,33 +1839,52 @@ func userReservationCancelHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tx := dbx.MustBegin()
-
 	reservation := Reservation{}
 	query := "SELECT * FROM reservations WHERE reservation_id=? AND user_id=?"
-	err = tx.Get(&reservation, query, itemID, user.ID)
-	fmt.Println("CANCEL", reservation, itemID, user.ID)
+	err = dbx.Get(&reservation, query, itemID, user.ID)
 	if err == sql.ErrNoRows {
-		tx.Rollback()
 		errorResponse(w, http.StatusBadRequest, "reservations naiyo")
 		return
 	}
 	if err != nil {
-		tx.Rollback()
 		errorResponse(w, http.StatusInternalServerError, "予約情報の検索に失敗しました")
 	}
 
-	switch reservation.Status {
-	case "rejected":
-		tx.Rollback()
+	if reservation.Status == "rejected" {
 		errorResponse(w, http.StatusInternalServerError, "何らかの理由により予約はRejected状態です")
 		return
+	}
+
+	tx := dbx.MustBegin()
+
+	query = "DELETE FROM reservations WHERE reservation_id=? AND user_id=?"
+	_, err = tx.Exec(query, itemID, user.ID)
+	if err != nil {
+		tx.Rollback()
+		errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	query = "DELETE FROM seat_reservations WHERE reservation_id=?"
+	_, err = tx.Exec(query, itemID)
+	if err == sql.ErrNoRows {
+		tx.Rollback()
+		errorResponse(w, http.StatusInternalServerError, "seat naiyo")
+		// errorResponse(w, http.Status, "authentication failed")
+		return
+	}
+	if err != nil {
+		tx.Rollback()
+		errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	switch reservation.Status {
 	case "done":
 		// 支払いをキャンセルする
 		payInfo := CancelPaymentInformationRequest{reservation.PaymentId}
 		j, err := json.Marshal(payInfo)
 		if err != nil {
-			tx.Rollback()
 			errorResponse(w, http.StatusInternalServerError, "JSON Marshalに失敗しました")
 			log.Println(err.Error())
 			return
@@ -1875,7 +1895,6 @@ func userReservationCancelHandler(w http.ResponseWriter, r *http.Request) {
 			payment_api = "http://payment:5000"
 		}
 
-		client := &http.Client{Timeout: time.Duration(10) * time.Second}
 		req, err := http.NewRequest("DELETE", payment_api+"/payment/"+reservation.PaymentId, bytes.NewBuffer(j))
 		if err != nil {
 			tx.Rollback()
@@ -1912,35 +1931,14 @@ func userReservationCancelHandler(w http.ResponseWriter, r *http.Request) {
 		output := CancelPaymentInformationResponse{}
 		err = json.Unmarshal(body, &output)
 		if err != nil {
+			tx.Rollback()
+			errorResponse(w, http.StatusInternalServerError, "レスポンスの読み込みに失敗しました")
 			errorResponse(w, http.StatusInternalServerError, "JSON parseに失敗しました")
 			log.Println(err.Error())
 			return
 		}
-		fmt.Println(output)
 	default:
 		// pass(requesting状態のものはpayment_id無いので叩かない)
-	}
-
-	query = "DELETE FROM reservations WHERE reservation_id=? AND user_id=?"
-	_, err = tx.Exec(query, itemID, user.ID)
-	if err != nil {
-		tx.Rollback()
-		errorResponse(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	query = "DELETE FROM seat_reservations WHERE reservation_id=?"
-	_, err = tx.Exec(query, itemID)
-	if err == sql.ErrNoRows {
-		tx.Rollback()
-		errorResponse(w, http.StatusInternalServerError, "seat naiyo")
-		// errorResponse(w, http.Status, "authentication failed")
-		return
-	}
-	if err != nil {
-		tx.Rollback()
-		errorResponse(w, http.StatusInternalServerError, err.Error())
-		return
 	}
 
 	tx.Commit()

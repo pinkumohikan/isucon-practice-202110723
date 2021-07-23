@@ -2042,14 +2042,12 @@ func main() {
 	}
 	defer dbx.Close()
 
-<<<<<<< HEAD
 	dbx.SetMaxIdleConns(100)
 	dbx.SetMaxOpenConns(100)
 	dbx.SetConnMaxLifetime(120 * time.Second)
-=======
+
 	// 初期化
 	createStationMaster()
->>>>>>> main
 
 	// HTTP
 

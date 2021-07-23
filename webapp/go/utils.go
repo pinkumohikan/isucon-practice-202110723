@@ -70,15 +70,12 @@ func (train Train) getAvailableSeats(fromStation Station, toStation Station, sea
 	// すでに取られている予約を取得する
 	query = `
 	SELECT sr.reservation_id, sr.car_number, sr.seat_row, sr.seat_column
-	FROM seat_reservations sr, reservations r, seat_master s, station_master std, station_master sta
+	FROM seat_reservations AS sr
+	     INNER JOIN reservations AS r ON r.reservation_id = sr.reservation_id
+	     INNER JOIN station_master AS std ON std.name = r.departure
+	     INNER JOIN station_master AS sta ON sta.name = r.arrival
 	WHERE
-		r.reservation_id=sr.reservation_id AND
-		s.train_class=r.train_class AND
-		s.car_number=sr.car_number AND
-		s.seat_column=sr.seat_column AND
-		s.seat_row=sr.seat_row AND
-		std.name=r.departure AND
-		sta.name=r.arrival
+		1 = 1
 	`
 
 	if train.IsNobori {

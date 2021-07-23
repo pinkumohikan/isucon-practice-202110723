@@ -43,6 +43,8 @@ type Station struct {
 	IsStopLocal       bool    `json:"is_stop_local" db:"is_stop_local"`
 }
 
+type StationList []Station
+
 type DistanceFare struct {
 	Distance float64 `json:"distance" db:"distance"`
 	Fare     int     `json:"fare" db:"fare"`
@@ -242,6 +244,7 @@ const (
 
 var (
 	store sessions.Store = sessions.NewCookieStore([]byte(secureRandomStr(20)))
+	stationList = StationList{}
 )
 
 func handler(w http.ResponseWriter, r *http.Request) {
@@ -461,32 +464,11 @@ func trainSearchHandler(w http.ResponseWriter, r *http.Request) {
 	child, _ := strconv.Atoi(r.URL.Query().Get("child"))
 
 	var fromStation, toStation Station
+
 	query := "SELECT * FROM station_master WHERE name=?"
 
-	// From
-	err = dbx.Get(&fromStation, query, fromName)
-	if err == sql.ErrNoRows {
-		log.Print("fromStation: no rows")
-		errorResponse(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	// To
-	err = dbx.Get(&toStation, query, toName)
-	if err == sql.ErrNoRows {
-		log.Print("toStation: no rows")
-		errorResponse(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err != nil {
-		log.Print(err)
-		errorResponse(w, http.StatusInternalServerError, err.Error())
-		return
-	}
+	fromStation = searchStationMasterByName(fromName)
+	toStation = searchStationMasterByName(toName)
 
 	isNobori := false
 	if fromStation.Distance > toStation.Distance {
@@ -2109,6 +2091,25 @@ func dummyHandler(w http.ResponseWriter, r *http.Request) {
 	messageResponse(w, "ok")
 }
 
+func createStationMaster() {
+	query := `select * from station_master;`
+	err := dbx.Select(&stationList, query)
+	if err != nil {
+		log.Println(err.Error())
+	}
+}
+
+func searchStationMasterByName(name string) Station {
+	var rStation  Station
+	for _, station := range stationList {
+		if station.Name == name {
+			rStation = station
+		}
+	}
+	return rStation
+}
+
+
 func main() {
 	// MySQL関連のお膳立て
 	var err error
@@ -2152,6 +2153,9 @@ func main() {
 		log.Fatalf("failed to connect to DB: %s.", err.Error())
 	}
 	defer dbx.Close()
+
+	// 初期化
+	createStationMaster()
 
 	// HTTP
 

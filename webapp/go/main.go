@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	_ "net/http/pprof"
@@ -27,9 +28,11 @@ import (
 )
 
 var (
-	banner        = `ISUTRAIN API`
-	TrainClassMap = map[string]string{"express": "最速", "semi_express": "中間", "local": "遅いやつ"}
-	client = &http.Client{Timeout: time.Duration(10) * time.Second}
+	banner          = `ISUTRAIN API`
+	TrainClassMap   = map[string]string{"express": "最速", "semi_express": "中間", "local": "遅いやつ"}
+	client          = &http.Client{Timeout: time.Duration(10) * time.Second}
+	cancelQueue     []string
+	cancelQueueLock = sync.Mutex{}
 )
 
 var dbx *sqlx.DB
@@ -216,14 +219,6 @@ type ReservationResponse struct {
 	DepartureTime string            `json:"departure_time"`
 	ArrivalTime   string            `json:"arrival_time"`
 	Seats         []SeatReservation `json:"seats"`
-}
-
-type CancelPaymentInformationRequest struct {
-	PaymentId string `json:"payment_id"`
-}
-
-type CancelPaymentInformationResponse struct {
-	IsOk bool `json:"is_ok"`
 }
 
 type Settings struct {
@@ -1881,62 +1876,9 @@ func userReservationCancelHandler(w http.ResponseWriter, r *http.Request) {
 
 	switch reservation.Status {
 	case "done":
-		// 支払いをキャンセルする
-		payInfo := CancelPaymentInformationRequest{reservation.PaymentId}
-		j, err := json.Marshal(payInfo)
-		if err != nil {
-			errorResponse(w, http.StatusInternalServerError, "JSON Marshalに失敗しました")
-			log.Println(err.Error())
-			return
-		}
-
-		payment_api := os.Getenv("PAYMENT_API")
-		if payment_api == "" {
-			payment_api = "http://payment:5000"
-		}
-
-		req, err := http.NewRequest("DELETE", payment_api+"/payment/"+reservation.PaymentId, bytes.NewBuffer(j))
-		if err != nil {
-			tx.Rollback()
-			errorResponse(w, http.StatusInternalServerError, "HTTPリクエストの作成に失敗しました")
-			log.Println(err.Error())
-			return
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			tx.Rollback()
-			errorResponse(w, resp.StatusCode, "HTTP DELETEに失敗しました")
-			log.Println(err.Error())
-			return
-		}
-		defer resp.Body.Close()
-
-		// リクエスト失敗
-		if resp.StatusCode != http.StatusOK {
-			tx.Rollback()
-			errorResponse(w, http.StatusInternalServerError, "決済のキャンセルに失敗しました")
-			log.Println(resp.StatusCode)
-			return
-		}
-
-		body, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			tx.Rollback()
-			errorResponse(w, http.StatusInternalServerError, "レスポンスの読み込みに失敗しました")
-			log.Println(err.Error())
-			return
-		}
-
-		// リクエスト取り出し
-		output := CancelPaymentInformationResponse{}
-		err = json.Unmarshal(body, &output)
-		if err != nil {
-			tx.Rollback()
-			errorResponse(w, http.StatusInternalServerError, "レスポンスの読み込みに失敗しました")
-			errorResponse(w, http.StatusInternalServerError, "JSON parseに失敗しました")
-			log.Println(err.Error())
-			return
-		}
+		cancelQueueLock.Lock()
+		cancelQueue = append(cancelQueue, reservation.PaymentId)
+		cancelQueueLock.Unlock()
 	default:
 		// pass(requesting状態のものはpayment_id無いので叩かない)
 	}
@@ -1996,6 +1938,41 @@ func searchStationMasterByName(name string) Station {
 	return stationListByName[name]
 }
 
+func bulkCancel(ids []string) {
+	payment_api := os.Getenv("PAYMENT_API")
+	if payment_api == "" {
+		payment_api = "http://payment:5000"
+	}
+
+	p := struct {
+		PaymentId []string `json:"payment_id"`
+	}{ids}
+
+	j, err := json.Marshal(p)
+	if err != nil {
+		log.Println("err", err)
+		return
+	}
+
+	req, err := http.NewRequest("POST", payment_api+"/payment/_bulk", bytes.NewBuffer(j))
+	if err != nil {
+		log.Println("err", err)
+		return
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Println("err", err)
+		return
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		cancelQueueLock.Lock()
+		cancelQueue = append(cancelQueue, ids...)
+		cancelQueueLock.Unlock()
+	}
+}
+
 func main() {
 	// MySQL関連のお膳立て
 	var err error
@@ -2046,6 +2023,20 @@ func main() {
 
 	// 初期化
 	createStationMaster()
+
+	go func() {
+		for {
+			cancelQueueLock.Lock()
+			cancelIds := cancelQueue
+			cancelQueue = []string{}
+			cancelQueueLock.Unlock()
+
+			go bulkCancel(cancelIds)
+
+			// cancelIdsのキャンセル処理
+			time.Sleep(time.Second * 1)
+		}
+	}()
 
 	// HTTP
 

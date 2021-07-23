@@ -14,7 +14,7 @@ webapp:
 payment:
 	cd blackbox/payment && make && cp bin/payment_linux ../../ansible/roles/benchmark/files/payment
 
-gogo: stop-services build truncate-logs start-services
+gogo: stop-services build truncate-logs start-services bench
 
 build:
 	make -C webapp/go isutrain

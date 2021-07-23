@@ -15,13 +15,14 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/felixge/fgprof"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/sessions"
 	"github.com/jmoiron/sqlx"
 	goji "goji.io"
 	"goji.io/pat"
 	"golang.org/x/crypto/pbkdf2"
-	// "sync"
+	_ "net/http/pprof"
 )
 
 var (
@@ -2174,6 +2175,8 @@ func main() {
 	mux.HandleFunc(pat.Get("/api/user/reservations"), userReservationsHandler)
 	mux.HandleFunc(pat.Get("/api/user/reservations/:item_id"), userReservationResponseHandler)
 	mux.HandleFunc(pat.Post("/api/user/reservations/:item_id/cancel"), userReservationCancelHandler)
+
+	mux.Handle(pat.Get("/debug/fgprof"), fgprof.Handler())
 
 	fmt.Println(banner)
 	err = http.ListenAndServe(":8000", mux)

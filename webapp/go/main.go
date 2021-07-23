@@ -1939,6 +1939,12 @@ func searchStationMasterByName(name string) Station {
 }
 
 func bulkCancel(ids []string) {
+	log.Printf("%#x件 bulk cancelするよ", ids)
+
+	if len(ids) == 0 {
+		return
+	}
+
 	payment_api := os.Getenv("PAYMENT_API")
 	if payment_api == "" {
 		payment_api = "http://payment:5000"

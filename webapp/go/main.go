@@ -258,6 +258,8 @@ func messageResponse(w http.ResponseWriter, message string) {
 }
 
 func errorResponse(w http.ResponseWriter, errCode int, message string) {
+	log.Printf("StatusCode:%d Reason: %s", errCode, message)
+
 	e := map[string]interface{}{
 		"is_error": true,
 		"message":  message,

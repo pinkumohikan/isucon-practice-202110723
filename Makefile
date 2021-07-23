@@ -53,3 +53,5 @@ minako:
 	rsync -av -e ssh /home/isucon/logs ubuntu@35.74.231.100:/home/ubuntu  
 satuki:
 	ssh ubuntu@35.74.231.100 "sh push_github.sh"
+couple: kenji minako satuki
+

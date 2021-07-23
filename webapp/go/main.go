@@ -245,6 +245,7 @@ const (
 var (
 	store sessions.Store = sessions.NewCookieStore([]byte(secureRandomStr(20)))
 	stationList = StationList{}
+	stationListByName = map[string]Station{}
 )
 
 func handler(w http.ResponseWriter, r *http.Request) {
@@ -1967,16 +1968,14 @@ func createStationMaster() {
 	if err != nil {
 		log.Println(err.Error())
 	}
+
+	for _, station := range stationList {
+		stationListByName[station.Name] = station
+	}
 }
 
 func searchStationMasterByName(name string) Station {
-	var rStation  Station
-	for _, station := range stationList {
-		if station.Name == name {
-			rStation = station
-		}
-	}
-	return rStation
+	return stationListByName[name]
 }
 
 

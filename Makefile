@@ -1,4 +1,4 @@
-.PHONY: frontend webapp payment gogo build　stop-services start-services truncate-logs bench　kataribe
+.PHONY: frontend webapp payment gogo build　stop-services start-services truncate-logs bench kataribe
 
 all: frontend webapp payment bench
 

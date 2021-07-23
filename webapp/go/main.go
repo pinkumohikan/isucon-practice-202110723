@@ -15,13 +15,15 @@ import (
 	"strconv"
 	"time"
 
+	_ "net/http/pprof"
+
+	"github.com/felixge/fgprof"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/sessions"
 	"github.com/jmoiron/sqlx"
 	goji "goji.io"
 	"goji.io/pat"
 	"golang.org/x/crypto/pbkdf2"
-	// "sync"
 )
 
 var (
@@ -41,6 +43,8 @@ type Station struct {
 	IsStopSemiExpress bool    `json:"is_stop_semi_express" db:"is_stop_semi_express"`
 	IsStopLocal       bool    `json:"is_stop_local" db:"is_stop_local"`
 }
+
+type StationList []Station
 
 type DistanceFare struct {
 	Distance float64 `json:"distance" db:"distance"`
@@ -236,11 +240,13 @@ type AuthResponse struct {
 
 const (
 	sessionName   = "session_isutrain"
-	availableDays = 10
+	availableDays = 50
 )
 
 var (
-	store sessions.Store = sessions.NewCookieStore([]byte(secureRandomStr(20)))
+	store             sessions.Store = sessions.NewCookieStore([]byte(secureRandomStr(20)))
+	stationList                      = StationList{}
+	stationListByName                = map[string]Station{}
 )
 
 func handler(w http.ResponseWriter, r *http.Request) {
@@ -257,6 +263,8 @@ func messageResponse(w http.ResponseWriter, message string) {
 }
 
 func errorResponse(w http.ResponseWriter, errCode int, message string) {
+	log.Printf("StatusCode:%d Reason: %s", errCode, message)
+
 	e := map[string]interface{}{
 		"is_error": true,
 		"message":  message,
@@ -460,39 +468,16 @@ func trainSearchHandler(w http.ResponseWriter, r *http.Request) {
 	child, _ := strconv.Atoi(r.URL.Query().Get("child"))
 
 	var fromStation, toStation Station
-	query := "SELECT * FROM station_master WHERE name=?"
 
-	// From
-	err = dbx.Get(&fromStation, query, fromName)
-	if err == sql.ErrNoRows {
-		log.Print("fromStation: no rows")
-		errorResponse(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	// To
-	err = dbx.Get(&toStation, query, toName)
-	if err == sql.ErrNoRows {
-		log.Print("toStation: no rows")
-		errorResponse(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err != nil {
-		log.Print(err)
-		errorResponse(w, http.StatusInternalServerError, err.Error())
-		return
-	}
+	fromStation = searchStationMasterByName(fromName)
+	toStation = searchStationMasterByName(toName)
 
 	isNobori := false
 	if fromStation.Distance > toStation.Distance {
 		isNobori = true
 	}
 
-	query = "SELECT * FROM station_master ORDER BY distance"
+	query := "SELECT * FROM station_master ORDER BY distance"
 	if isNobori {
 		// 上りだったら駅リストを逆にする
 		query += " DESC"
@@ -749,32 +734,8 @@ func trainSeatsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var fromStation, toStation Station
-	query = "SELECT * FROM station_master WHERE name=?"
-
-	// From
-	err = dbx.Get(&fromStation, query, fromName)
-	if err == sql.ErrNoRows {
-		log.Print("fromStation: no rows")
-		errorResponse(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err != nil {
-		errorResponse(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	// To
-	err = dbx.Get(&toStation, query, toName)
-	if err == sql.ErrNoRows {
-		log.Print("toStation: no rows")
-		errorResponse(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err != nil {
-		log.Print(err)
-		errorResponse(w, http.StatusBadRequest, err.Error())
-		return
-	}
+	fromStation = searchStationMasterByName(fromName)
+	toStation = searchStationMasterByName(toName)
 
 	usableTrainClassList := getUsableTrainClassList(fromStation, toStation)
 	usable := false
@@ -805,17 +766,29 @@ func trainSeatsHandler(w http.ResponseWriter, r *http.Request) {
 
 		s := SeatInformation{seat.SeatRow, seat.SeatColumn, seat.SeatClass, seat.IsSmokingSeat, false}
 
-		seatReservationList := []SeatReservation{}
+		type SeatReservationNeo struct {
+			ReservationId int    `json:"reservation_id,omitempty" db:"reservation_id"`
+			CarNumber     int    `json:"car_number,omitempty" db:"car_number"`
+			SeatRow       int    `json:"seat_row" db:"seat_row"`
+			SeatColumn    string `json:"seat_column" db:"seat_column"`
+			Departure     string `json:"_" db:"departure"`
+			Arrival       string `json:"_" db:"arrival"`
+		}
+
+		seatReservationNeoList := []SeatReservationNeo{}
 
 		query := `
-SELECT s.*
-FROM seat_reservations s, reservations r
+SELECT s.*, r.departure, r.arrival
+FROM seat_reservations s
+LEFT JOIN reservations r
+	ON s.reservation_id = r.reservation_id
+
 WHERE
 	r.date=? AND r.train_class=? AND r.train_name=? AND car_number=? AND seat_row=? AND seat_column=?
 `
 
 		err = dbx.Select(
-			&seatReservationList, query,
+			&seatReservationNeoList, query,
 			date.Format("2006/01/02"),
 			seat.TrainClass,
 			trainName,
@@ -828,27 +801,13 @@ WHERE
 			return
 		}
 
-		fmt.Println(seatReservationList)
+		fmt.Println(seatReservationNeoList)
 
-		for _, seatReservation := range seatReservationList {
-			reservation := Reservation{}
-			query = "SELECT * FROM reservations WHERE reservation_id=?"
-			err = dbx.Get(&reservation, query, seatReservation.ReservationId)
-			if err != nil {
-				panic(err)
-			}
+		for _, seatReservationNeo := range seatReservationNeoList {
 
 			var departureStation, arrivalStation Station
-			query = "SELECT * FROM station_master WHERE name=?"
-
-			err = dbx.Get(&departureStation, query, reservation.Departure)
-			if err != nil {
-				panic(err)
-			}
-			err = dbx.Get(&arrivalStation, query, reservation.Arrival)
-			if err != nil {
-				panic(err)
-			}
+			departureStation = searchStationMasterByName(seatReservationNeo.Departure)
+			arrivalStation = searchStationMasterByName(seatReservationNeo.Arrival)
 
 			if train.IsNobori {
 				// 上り
@@ -982,70 +941,13 @@ func trainReservationHandler(w http.ResponseWriter, r *http.Request) {
 
 	// 列車自体の駅IDを求める
 	var departureStation, arrivalStation Station
-	query = "SELECT * FROM station_master WHERE name=?"
-	// Departure
-	err = tx.Get(&departureStation, query, tmas.StartStation)
-	if err == sql.ErrNoRows {
-		tx.Rollback()
-		errorResponse(w, http.StatusNotFound, "リクエストされた列車の始発駅データがみつかりません")
-		log.Println(err.Error())
-		return
-	}
-	if err != nil {
-		tx.Rollback()
-		errorResponse(w, http.StatusInternalServerError, "リクエストされた列車の始発駅データの取得に失敗しました")
-		log.Println(err.Error())
-		return
-	}
-
-	// Arrive
-	err = tx.Get(&arrivalStation, query, tmas.LastStation)
-	if err == sql.ErrNoRows {
-		tx.Rollback()
-		errorResponse(w, http.StatusNotFound, "リクエストされた列車の終着駅データがみつかりません")
-		log.Println(err.Error())
-		return
-	}
-	if err != nil {
-		tx.Rollback()
-		errorResponse(w, http.StatusInternalServerError, "リクエストされた列車の終着駅データの取得に失敗しました")
-		log.Println(err.Error())
-		return
-	}
+	departureStation = searchStationMasterByName(tmas.StartStation)
+	arrivalStation = searchStationMasterByName(tmas.LastStation)
 
 	// リクエストされた乗車区間の駅IDを求める
 	var fromStation, toStation Station
-	query = "SELECT * FROM station_master WHERE name=?"
-
-	// From
-	err = tx.Get(&fromStation, query, req.Departure)
-	if err == sql.ErrNoRows {
-		tx.Rollback()
-		errorResponse(w, http.StatusNotFound, fmt.Sprintf("乗車駅データがみつかりません %s", req.Departure))
-		log.Println(err.Error())
-		return
-	}
-	if err != nil {
-		tx.Rollback()
-		errorResponse(w, http.StatusInternalServerError, "乗車駅データの取得に失敗しました")
-		log.Println(err.Error())
-		return
-	}
-
-	// To
-	err = tx.Get(&toStation, query, req.Arrival)
-	if err == sql.ErrNoRows {
-		tx.Rollback()
-		errorResponse(w, http.StatusNotFound, fmt.Sprintf("降車駅データがみつかりません %s", req.Arrival))
-		log.Println(err.Error())
-		return
-	}
-	if err != nil {
-		tx.Rollback()
-		errorResponse(w, http.StatusInternalServerError, "降車駅データの取得に失敗しました")
-		log.Println(err.Error())
-		return
-	}
+	fromStation = searchStationMasterByName(req.Departure)
+	toStation = searchStationMasterByName(req.Arrival)
 
 	switch req.TrainClass {
 	case "最速":
@@ -1138,6 +1040,7 @@ func trainReservationHandler(w http.ResponseWriter, r *http.Request) {
 		req.Seats = []RequestSeat{} // 座席リクエスト情報は空に
 		for carnum := 1; carnum <= 16; carnum++ {
 			seatList := []Seat{}
+
 			query = "SELECT * FROM seat_master WHERE train_class=? AND car_number=? AND seat_class=? AND is_smoking_seat=? ORDER BY seat_row, seat_column"
 			err = dbx.Select(&seatList, query, req.TrainClass, carnum, req.SeatClass, req.IsSmokingSeat)
 			if err != nil {
@@ -1149,10 +1052,26 @@ func trainReservationHandler(w http.ResponseWriter, r *http.Request) {
 			var seatInformationList []SeatInformation
 			for _, seat := range seatList {
 				s := SeatInformation{seat.SeatRow, seat.SeatColumn, seat.SeatClass, seat.IsSmokingSeat, false}
-				seatReservationList := []SeatReservation{}
-				query = "SELECT s.* FROM seat_reservations s, reservations r WHERE r.date=? AND r.train_class=? AND r.train_name=? AND car_number=? AND seat_row=? AND seat_column=? FOR UPDATE"
+				type SeatReservationNeo struct {
+					ReservationId int    `json:"reservation_id,omitempty" db:"reservation_id"`
+					CarNumber     int    `json:"car_number,omitempty" db:"car_number"`
+					SeatRow       int    `json:"seat_row" db:"seat_row"`
+					SeatColumn    string `json:"seat_column" db:"seat_column"`
+					Departure     string `json:"_" db:"departure"`
+					Arrival       string `json:"_" db:"arrival"`
+				}
+
+				seatReservationNeoList := []SeatReservationNeo{}
+				query := `
+				SELECT s.*, r.departure, r.arrival
+				FROM seat_reservations s
+				LEFT JOIN reservations r
+					ON s.reservation_id = r.reservation_id
+				WHERE
+					r.date=? AND r.train_class=? AND r.train_name=? AND car_number=? AND seat_row=? AND seat_column=?
+				`
 				err = dbx.Select(
-					&seatReservationList, query,
+					&seatReservationNeoList, query,
 					date.Format("2006/01/02"),
 					seat.TrainClass,
 					req.TrainName,
@@ -1166,27 +1085,11 @@ func trainReservationHandler(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 
-				for _, seatReservation := range seatReservationList {
-					reservation := Reservation{}
-					query = "SELECT * FROM reservations WHERE reservation_id=? FOR UPDATE"
-					err = dbx.Get(&reservation, query, seatReservation.ReservationId)
-					if err != nil {
-						panic(err)
-					}
+				for _, seatReservation := range seatReservationNeoList {
 
 					var departureStation, arrivalStation Station
-					query = "SELECT * FROM station_master WHERE name=?"
-
-					err = dbx.Get(&departureStation, query, reservation.Departure)
-					if err != nil {
-						tx.Rollback()
-						panic(err)
-					}
-					err = dbx.Get(&arrivalStation, query, reservation.Arrival)
-					if err != nil {
-						tx.Rollback()
-						panic(err)
-					}
+					departureStation = searchStationMasterByName(seatReservation.Departure)
+					arrivalStation = searchStationMasterByName(seatReservation.Arrival)
 
 					if train.IsNobori {
 						// 上り
@@ -1344,37 +1247,8 @@ func trainReservationHandler(w http.ResponseWriter, r *http.Request) {
 
 		// 予約情報の乗車区間の駅IDを求める
 		var reservedfromStation, reservedtoStation Station
-		query = "SELECT * FROM station_master WHERE name=?"
-
-		// From
-		err = tx.Get(&reservedfromStation, query, reservation.Departure)
-		if err == sql.ErrNoRows {
-			tx.Rollback()
-			errorResponse(w, http.StatusNotFound, "予約情報に記載された列車の乗車駅データがみつかりません")
-			log.Println(err.Error())
-			return
-		}
-		if err != nil {
-			tx.Rollback()
-			errorResponse(w, http.StatusInternalServerError, "予約情報に記載された列車の乗車駅データの取得に失敗しました")
-			log.Println(err.Error())
-			return
-		}
-
-		// To
-		err = tx.Get(&reservedtoStation, query, reservation.Arrival)
-		if err == sql.ErrNoRows {
-			tx.Rollback()
-			errorResponse(w, http.StatusNotFound, "予約情報に記載された列車の降車駅データがみつかりません")
-			log.Println(err.Error())
-			return
-		}
-		if err != nil {
-			tx.Rollback()
-			errorResponse(w, http.StatusInternalServerError, "予約情報に記載された列車の降車駅データの取得に失敗しました")
-			log.Println(err.Error())
-			return
-		}
+		reservedfromStation = searchStationMasterByName(reservation.Departure)
+		reservedtoStation = searchStationMasterByName(reservation.Arrival)
 
 		// 予約の区間重複判定
 		secdup := false
@@ -2108,6 +1982,22 @@ func dummyHandler(w http.ResponseWriter, r *http.Request) {
 	messageResponse(w, "ok")
 }
 
+func createStationMaster() {
+	query := `select * from station_master;`
+	err := dbx.Select(&stationList, query)
+	if err != nil {
+		log.Println(err.Error())
+	}
+
+	for _, station := range stationList {
+		stationListByName[station.Name] = station
+	}
+}
+
+func searchStationMasterByName(name string) Station {
+	return stationListByName[name]
+}
+
 func main() {
 	// MySQL関連のお膳立て
 	var err error
@@ -2152,9 +2042,14 @@ func main() {
 	}
 	defer dbx.Close()
 
+<<<<<<< HEAD
 	dbx.SetMaxIdleConns(100)
 	dbx.SetMaxOpenConns(100)
 	dbx.SetConnMaxLifetime(120 * time.Second)
+=======
+	// 初期化
+	createStationMaster()
+>>>>>>> main
 
 	// HTTP
 
@@ -2178,6 +2073,8 @@ func main() {
 	mux.HandleFunc(pat.Get("/api/user/reservations"), userReservationsHandler)
 	mux.HandleFunc(pat.Get("/api/user/reservations/:item_id"), userReservationResponseHandler)
 	mux.HandleFunc(pat.Post("/api/user/reservations/:item_id/cancel"), userReservationCancelHandler)
+
+	mux.Handle(pat.Get("/debug/fgprof"), fgprof.Handler())
 
 	fmt.Println(banner)
 	err = http.ListenAndServe(":8000", mux)

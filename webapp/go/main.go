@@ -2081,6 +2081,7 @@ func initializeHandler(w http.ResponseWriter, r *http.Request) {
 	dbx.Exec("TRUNCATE seat_reservations")
 	dbx.Exec("TRUNCATE reservations")
 	dbx.Exec("TRUNCATE users")
+	dbx.Exec("CREATE INDEX idx_train_timetable_master ON train_timetable_master (date,train_class,train_name,station)")
 
 	resp := InitializeResponse{
 		availableDays,

@@ -33,6 +33,8 @@ start-services:
 truncate-logs:
 	sudo truncate --size 0 /var/log/nginx/access.log
 	sudo truncate --size 0 /var/log/nginx/error.log
+	sudo truncate --size 0 /var/log/mysql/mysql-slow.log
+	sudo truncate --size 0 /var/log/mysql/error.log
 
 bench:
 	cd bench && ./bin/bench_linux run --target=http://localhost

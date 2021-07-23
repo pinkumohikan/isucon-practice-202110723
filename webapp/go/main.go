@@ -240,7 +240,7 @@ type AuthResponse struct {
 
 const (
 	sessionName   = "session_isutrain"
-	availableDays = 50
+	availableDays = 70
 )
 
 var (
@@ -2041,6 +2041,10 @@ func main() {
 		log.Fatalf("failed to connect to DB: %s.", err.Error())
 	}
 	defer dbx.Close()
+
+	dbx.SetMaxIdleConns(100)
+	dbx.SetMaxOpenConns(100)
+	dbx.SetConnMaxLifetime(120 * time.Second)
 
 	// 初期化
 	createStationMaster()

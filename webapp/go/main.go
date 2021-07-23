@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	_ "net/http/pprof"
@@ -27,8 +28,11 @@ import (
 )
 
 var (
-	banner        = `ISUTRAIN API`
-	TrainClassMap = map[string]string{"express": "最速", "semi_express": "中間", "local": "遅いやつ"}
+	banner          = `ISUTRAIN API`
+	TrainClassMap   = map[string]string{"express": "最速", "semi_express": "中間", "local": "遅いやつ"}
+	client          = &http.Client{Timeout: time.Duration(10) * time.Second}
+	cancelQueue     []string
+	cancelQueueLock = sync.Mutex{}
 )
 
 var dbx *sqlx.DB
@@ -217,14 +221,6 @@ type ReservationResponse struct {
 	Seats         []SeatReservation `json:"seats"`
 }
 
-type CancelPaymentInformationRequest struct {
-	PaymentId string `json:"payment_id"`
-}
-
-type CancelPaymentInformationResponse struct {
-	IsOk bool `json:"is_ok"`
-}
-
 type Settings struct {
 	PaymentAPI string `json:"payment_api"`
 }
@@ -240,7 +236,7 @@ type AuthResponse struct {
 
 const (
 	sessionName   = "session_isutrain"
-	availableDays = 70
+	availableDays = 100
 )
 
 var (
@@ -1838,88 +1834,23 @@ func userReservationCancelHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tx := dbx.MustBegin()
-
 	reservation := Reservation{}
 	query := "SELECT * FROM reservations WHERE reservation_id=? AND user_id=?"
-	err = tx.Get(&reservation, query, itemID, user.ID)
-	fmt.Println("CANCEL", reservation, itemID, user.ID)
+	err = dbx.Get(&reservation, query, itemID, user.ID)
 	if err == sql.ErrNoRows {
-		tx.Rollback()
 		errorResponse(w, http.StatusBadRequest, "reservations naiyo")
 		return
 	}
 	if err != nil {
-		tx.Rollback()
 		errorResponse(w, http.StatusInternalServerError, "予約情報の検索に失敗しました")
 	}
 
-	switch reservation.Status {
-	case "rejected":
-		tx.Rollback()
+	if reservation.Status == "rejected" {
 		errorResponse(w, http.StatusInternalServerError, "何らかの理由により予約はRejected状態です")
 		return
-	case "done":
-		// 支払いをキャンセルする
-		payInfo := CancelPaymentInformationRequest{reservation.PaymentId}
-		j, err := json.Marshal(payInfo)
-		if err != nil {
-			tx.Rollback()
-			errorResponse(w, http.StatusInternalServerError, "JSON Marshalに失敗しました")
-			log.Println(err.Error())
-			return
-		}
-
-		payment_api := os.Getenv("PAYMENT_API")
-		if payment_api == "" {
-			payment_api = "http://payment:5000"
-		}
-
-		client := &http.Client{Timeout: time.Duration(10) * time.Second}
-		req, err := http.NewRequest("DELETE", payment_api+"/payment/"+reservation.PaymentId, bytes.NewBuffer(j))
-		if err != nil {
-			tx.Rollback()
-			errorResponse(w, http.StatusInternalServerError, "HTTPリクエストの作成に失敗しました")
-			log.Println(err.Error())
-			return
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			tx.Rollback()
-			errorResponse(w, resp.StatusCode, "HTTP DELETEに失敗しました")
-			log.Println(err.Error())
-			return
-		}
-		defer resp.Body.Close()
-
-		// リクエスト失敗
-		if resp.StatusCode != http.StatusOK {
-			tx.Rollback()
-			errorResponse(w, http.StatusInternalServerError, "決済のキャンセルに失敗しました")
-			log.Println(resp.StatusCode)
-			return
-		}
-
-		body, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			tx.Rollback()
-			errorResponse(w, http.StatusInternalServerError, "レスポンスの読み込みに失敗しました")
-			log.Println(err.Error())
-			return
-		}
-
-		// リクエスト取り出し
-		output := CancelPaymentInformationResponse{}
-		err = json.Unmarshal(body, &output)
-		if err != nil {
-			errorResponse(w, http.StatusInternalServerError, "JSON parseに失敗しました")
-			log.Println(err.Error())
-			return
-		}
-		fmt.Println(output)
-	default:
-		// pass(requesting状態のものはpayment_id無いので叩かない)
 	}
+
+	tx := dbx.MustBegin()
 
 	query = "DELETE FROM reservations WHERE reservation_id=? AND user_id=?"
 	_, err = tx.Exec(query, itemID, user.ID)
@@ -1941,6 +1872,15 @@ func userReservationCancelHandler(w http.ResponseWriter, r *http.Request) {
 		tx.Rollback()
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	switch reservation.Status {
+	case "done":
+		cancelQueueLock.Lock()
+		cancelQueue = append(cancelQueue, reservation.PaymentId)
+		cancelQueueLock.Unlock()
+	default:
+		// pass(requesting状態のものはpayment_id無いので叩かない)
 	}
 
 	tx.Commit()
@@ -1998,6 +1938,47 @@ func searchStationMasterByName(name string) Station {
 	return stationListByName[name]
 }
 
+func bulkCancel(ids []string) {
+	log.Printf("%#x件 bulk cancelするよ", ids)
+
+	if len(ids) == 0 {
+		return
+	}
+
+	payment_api := os.Getenv("PAYMENT_API")
+	if payment_api == "" {
+		payment_api = "http://payment:5000"
+	}
+
+	p := struct {
+		PaymentId []string `json:"payment_id"`
+	}{ids}
+
+	j, err := json.Marshal(p)
+	if err != nil {
+		log.Println("err", err)
+		return
+	}
+
+	req, err := http.NewRequest("POST", payment_api+"/payment/_bulk", bytes.NewBuffer(j))
+	if err != nil {
+		log.Println("err", err)
+		return
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Println("err", err)
+		return
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		cancelQueueLock.Lock()
+		cancelQueue = append(cancelQueue, ids...)
+		cancelQueueLock.Unlock()
+	}
+}
+
 func main() {
 	// MySQL関連のお膳立て
 	var err error
@@ -2048,6 +2029,20 @@ func main() {
 
 	// 初期化
 	createStationMaster()
+
+	go func() {
+		for {
+			cancelQueueLock.Lock()
+			cancelIds := cancelQueue
+			cancelQueue = []string{}
+			cancelQueueLock.Unlock()
+
+			go bulkCancel(cancelIds)
+
+			// cancelIdsのキャンセル処理
+			time.Sleep(time.Second * 1)
+		}
+	}()
 
 	// HTTP
 

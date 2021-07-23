@@ -28,11 +28,13 @@ import (
 )
 
 var (
-	banner          = `ISUTRAIN API`
-	TrainClassMap   = map[string]string{"express": "最速", "semi_express": "中間", "local": "遅いやつ"}
-	client          = &http.Client{Timeout: time.Duration(10) * time.Second}
-	cancelQueue     []string
-	cancelQueueLock = sync.Mutex{}
+	banner           = `ISUTRAIN API`
+	TrainClassMap    = map[string]string{"express": "最速", "semi_express": "中間", "local": "遅いやつ"}
+	client           = &http.Client{Timeout: time.Duration(10) * time.Second}
+	cancelQueue      []string
+	cancelQueueLock  = sync.Mutex{}
+	fares            []Fare
+	distanceFareList []DistanceFare
 )
 
 var dbx *sqlx.DB
@@ -324,15 +326,6 @@ func distanceFareHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func getDistanceFare(origToDestDistance float64) (int, error) {
-
-	distanceFareList := []DistanceFare{}
-
-	query := "SELECT distance,fare FROM distance_fare_master ORDER BY distance"
-	err := dbx.Select(&distanceFareList, query)
-	if err != nil {
-		return 0, err
-	}
-
 	lastDistance := 0.0
 	lastFare := 0
 	for _, distanceFare := range distanceFareList {
@@ -354,58 +347,30 @@ func fareCalc(date time.Time, depStation int, destStation int, trainClass, seatC
 	// 距離運賃(円) * 期間倍率(繁忙期なら2倍等) * 車両クラス倍率(急行・各停等) * 座席クラス倍率(プレミアム・指定席・自由席)
 	//
 	var err error
-	var fromStation, toStation Station
 
-	query := "SELECT * FROM station_master WHERE id=?"
+	fromStation := stationList[depStation]
+	toStation := stationList[destStation]
 
-	// From
-	err = dbx.Get(&fromStation, query, depStation)
-	if err == sql.ErrNoRows {
-		return 0, err
-	}
-	if err != nil {
-		return 0, err
-	}
-
-	// To
-	err = dbx.Get(&toStation, query, destStation)
-	if err == sql.ErrNoRows {
-		return 0, err
-	}
-	if err != nil {
-		log.Print(err)
-		return 0, err
-	}
-
-	fmt.Println("distance", math.Abs(toStation.Distance-fromStation.Distance))
 	distFare, err := getDistanceFare(math.Abs(toStation.Distance - fromStation.Distance))
 	if err != nil {
 		return 0, err
 	}
-	fmt.Println("distFare", distFare)
 
 	// 期間・車両・座席クラス倍率
-	fareList := []Fare{}
-	query = "SELECT * FROM fare_master WHERE train_class=? AND seat_class=? ORDER BY start_date"
-	err = dbx.Select(&fareList, query, trainClass, seatClass)
-	if err != nil {
-		return 0, err
-	}
-
-	if len(fareList) == 0 {
-		return 0, fmt.Errorf("fare_master does not exists")
-	}
-
-	selectedFare := fareList[0]
+	var selectedFare Fare
 	date = time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
-	for _, fare := range fareList {
-		if !date.Before(fare.StartDate) {
-			fmt.Println(fare.StartDate, fare.FareMultiplier)
-			selectedFare = fare
+	for _, f := range fares {
+		if f.TrainClass != trainClass {
+			continue
 		}
+		if f.SeatClass != seatClass {
+			continue
+		}
+		if date.Before(f.StartDate) {
+			continue
+		}
+		selectedFare = f
 	}
-
-	fmt.Println("%%%%%%%%%%%%%%%%%%%")
 
 	return int(float64(distFare) * selectedFare.FareMultiplier), nil
 }
@@ -1916,13 +1881,16 @@ func dummyHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func createStationMaster() {
+	var sl StationList
 	query := `select * from station_master;`
-	err := dbx.Select(&stationList, query)
+	err := dbx.Select(&sl, query)
 	if err != nil {
 		log.Println(err.Error())
 	}
 
-	for _, station := range stationList {
+	stationList = make(StationList, 82)
+	for _, station := range sl {
+		stationList[station.ID] = station
 		stationListByName[station.Name] = station
 	}
 }
@@ -2037,8 +2005,15 @@ func main() {
 		}
 	}()
 
-	// HTTP
+	if err := dbx.Select(&fares, "SELECT * FROM fare_master ORDER BY start_date"); err != nil {
+		log.Fatalln(err)
+	}
 
+	if err := dbx.Select(&distanceFareList, "SELECT distance,fare FROM distance_fare_master ORDER BY distance"); err != nil {
+		log.Fatalln(err)
+	}
+
+	// HTTP
 	mux := goji.NewMux()
 
 	mux.HandleFunc(pat.Post("/initialize"), initializeHandler)

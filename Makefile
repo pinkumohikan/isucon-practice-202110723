@@ -17,7 +17,7 @@ payment:
 gogo: stop-services build truncate-logs start-services
 
 build:
-	cd webapp/go && go build -o isutrain main.go
+	make -C webapp/go isutrain
 
 stop-services:
 	sudo systemctl stop nginx

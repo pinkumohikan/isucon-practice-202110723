@@ -1033,84 +1033,77 @@ func trainReservationHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		seatList := []Seat{}
+		query = "SELECT * FROM seat_master WHERE train_class=? AND seat_class=? AND is_smoking_seat=? ORDER BY seat_row, seat_column"
+		err = dbx.Select(&seatList, query, req.TrainClass, req.SeatClass, req.IsSmokingSeat)
+		if err != nil {
+			tx.Rollback()
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		seatListByCarnum := make([][]Seat, 16)
+		for _,  seat := range seatList {
+			seatListByCarnum[seat.CarNumber] = append(seatListByCarnum[seat.CarNumber], seat)
+		}
+
+		type ReservationNeo struct {
+			Departure  string `json:"departure" db:"departure"`
+			Arrival    string `json:"arrival" db:"arrival"`
+			CarNumber  int    `json:"car_number,omitempty" db:"car_number"`
+			SeatRow    int    `json:"seat_row" db:"seat_row"`
+			SeatColumn string `json:"seat_column" db:"seat_column"`
+		}
+
+		reservationsNeo := []ReservationNeo{}
+
+		query = "SELECT departure,arrival,car_number,seat_row,seat_column FROM reservations r NATURAL JOIN seat_reservations WHERE date=? AND train_name=? FOR UPDATE"
+		err = dbx.Select(
+			&reservationsNeo, query,
+			date.Format("2006/01/02"),
+			req.TrainName,
+		)
+		if err != nil {
+			log.Print("failed to trainReservation: failed to get reservation list:", err)
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		seatInformationIsNobori := map[string]bool{}
+		for _, reservationNeo := range reservationsNeo {
+			var departureStation, arrivalStation Station
+			departureStation = searchStationMasterByName(reservationNeo.Departure)
+			arrivalStation = searchStationMasterByName(reservationNeo.Arrival)
+			if train.IsNobori {
+				// 上り
+				if toStation.ID < arrivalStation.ID && fromStation.ID <= arrivalStation.ID {
+					// pass
+				} else if toStation.ID >= departureStation.ID && fromStation.ID > departureStation.ID {
+					// pass
+				} else {
+					seatInformationIsNobori[strconv.Itoa(reservationNeo.CarNumber) + reservationNeo.SeatColumn + strconv.Itoa(reservationNeo.SeatRow)] = true
+				}
+			} else {
+				// 下り
+				if fromStation.ID < departureStation.ID && toStation.ID <= departureStation.ID {
+					// pass
+				} else if fromStation.ID >= arrivalStation.ID && toStation.ID > arrivalStation.ID {
+					// pass
+				} else {
+					seatInformationIsNobori[strconv.Itoa(reservationNeo.CarNumber) + reservationNeo.SeatColumn + strconv.Itoa(reservationNeo.SeatRow)] = true
+				}
+			}
+		}
+
+		seatInformationLists := make([][]SeatInformation, 17)
+		for _, seat := range seatList {
+			s := SeatInformation{seat.SeatRow, seat.SeatColumn, seat.SeatClass, seat.IsSmokingSeat, false}
+			s.IsOccupied = seatInformationIsNobori[strconv.Itoa(seat.CarNumber) + seat.SeatColumn + strconv.Itoa(seat.SeatRow)]
+			seatInformationLists[seat.CarNumber] = append(seatInformationLists[seat.CarNumber], s)
+		}
+
+
 		req.Seats = []RequestSeat{} // 座席リクエスト情報は空に
 		for carnum := 1; carnum <= 16; carnum++ {
-			seatList := []Seat{}
-
-			query = "SELECT * FROM seat_master WHERE train_class=? AND car_number=? AND seat_class=? AND is_smoking_seat=? ORDER BY seat_row, seat_column"
-			err = dbx.Select(&seatList, query, req.TrainClass, carnum, req.SeatClass, req.IsSmokingSeat)
-			if err != nil {
-				tx.Rollback()
-				errorResponse(w, http.StatusBadRequest, err.Error())
-				return
-			}
-
-			var seatInformationList []SeatInformation
-			for _, seat := range seatList {
-				s := SeatInformation{seat.SeatRow, seat.SeatColumn, seat.SeatClass, seat.IsSmokingSeat, false}
-				type SeatReservationNeo struct {
-					ReservationId int    `json:"reservation_id,omitempty" db:"reservation_id"`
-					CarNumber     int    `json:"car_number,omitempty" db:"car_number"`
-					SeatRow       int    `json:"seat_row" db:"seat_row"`
-					SeatColumn    string `json:"seat_column" db:"seat_column"`
-					Departure     string `json:"_" db:"departure"`
-					Arrival       string `json:"_" db:"arrival"`
-				}
-
-				seatReservationNeoList := []SeatReservationNeo{}
-				query := `
-				SELECT s.*, r.departure, r.arrival
-				FROM seat_reservations s
-				LEFT JOIN reservations r
-					ON s.reservation_id = r.reservation_id
-				WHERE
-					r.date=? AND r.train_class=? AND r.train_name=? AND car_number=? AND seat_row=? AND seat_column=?
-				`
-				err = dbx.Select(
-					&seatReservationNeoList, query,
-					date.Format("2006/01/02"),
-					seat.TrainClass,
-					req.TrainName,
-					seat.CarNumber,
-					seat.SeatRow,
-					seat.SeatColumn,
-				)
-				if err != nil {
-					tx.Rollback()
-					errorResponse(w, http.StatusBadRequest, err.Error())
-					return
-				}
-
-				for _, seatReservation := range seatReservationNeoList {
-
-					var departureStation, arrivalStation Station
-					departureStation = searchStationMasterByName(seatReservation.Departure)
-					arrivalStation = searchStationMasterByName(seatReservation.Arrival)
-
-					if train.IsNobori {
-						// 上り
-						if toStation.ID < arrivalStation.ID && fromStation.ID <= arrivalStation.ID {
-							// pass
-						} else if toStation.ID >= departureStation.ID && fromStation.ID > departureStation.ID {
-							// pass
-						} else {
-							s.IsOccupied = true
-						}
-					} else {
-						// 下り
-						if fromStation.ID < departureStation.ID && toStation.ID <= departureStation.ID {
-							// pass
-						} else if fromStation.ID >= arrivalStation.ID && toStation.ID > arrivalStation.ID {
-							// pass
-						} else {
-							s.IsOccupied = true
-						}
-					}
-				}
-
-				seatInformationList = append(seatInformationList, s)
-			}
-
 			// 曖昧予約席とその他の候補席を選出
 			var seatnum int           // 予約する座席の合計数
 			var reserved bool         // あいまい指定席確保済フラグ
@@ -1129,7 +1122,7 @@ func trainReservationHandler(w http.ResponseWriter, r *http.Request) {
 
 			// シート分だけ回して予約できる席を検索
 			var i int
-			for _, seat := range seatInformationList {
+			for _, seat := range seatInformationLists[carnum] {
 				if seat.Column == req.Column && !seat.IsOccupied && !reserved && vargue { // あいまい席があいてる
 					VagueSeat.Row = seat.Row
 					VagueSeat.Column = seat.Column

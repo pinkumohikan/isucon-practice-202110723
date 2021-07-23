@@ -21,13 +21,13 @@ build:
 
 stop-services:
 	sudo systemctl stop nginx
-	sudo systemctl stop isutrain.go.service
+	sudo systemctl stop isutrain-go.service
 	sudo systemctl stop mysql
 
 start-services:
 	sudo systemctl start mysql
 	sleep 5
-	sudo systemctl start isutrain.go.service
+	sudo systemctl start isutrain-go.service
 	sudo systemctl start nginx
 
 truncate-logs:

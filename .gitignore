@@ -1,2 +1,4 @@
 kataribe
 webapp/frontend/node_modules/*
+bench/*
+ansible/*

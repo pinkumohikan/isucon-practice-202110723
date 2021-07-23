@@ -2152,6 +2152,10 @@ func main() {
 	}
 	defer dbx.Close()
 
+	dbx.SetMaxIdleConns(100)
+	dbx.SetMaxOpenConns(100)
+	dbx.SetConnMaxLifetime(120 * time.Second)
+
 	// HTTP
 
 	mux := goji.NewMux()
